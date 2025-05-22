@@ -227,7 +227,6 @@
             margin: 0;
             overflow: hidden;
             background-color: #000;
-            font-family: sans-serif;
         }
 
         #ar-button {
@@ -241,19 +240,7 @@
             border: none;
             cursor: pointer;
             z-index: 10000;
-            border-radius: 4px;
-            user-select: none;
-            transition: background-color 0.3s ease;
         }
-
-            #ar-button:hover:not(:disabled) {
-                background-color: #005fcc;
-            }
-
-            #ar-button:disabled {
-                background-color: #555;
-                cursor: not-allowed;
-            }
 
         #notification {
             position: absolute;
@@ -263,11 +250,11 @@
             background: rgba(0, 0, 0, 0.7);
             padding: 8px 12px;
             border-radius: 5px;
+            font-family: sans-serif;
+            z-index: 10000;
             max-width: 300px;
             word-wrap: break-word;
-            z-index: 10000;
-            pointer-events: none;
-            user-select: none;
+            white-space: pre-line; /* Allow line breaks */
         }
     </style>
 </head>
@@ -276,28 +263,33 @@
     <div id="notification">Waiting to start...</div>
 
     <script type="module">
+
         import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.153.0/build/three.module.js';
 
         let renderer, scene, camera, xrSession, xrGlBinding, refSpace;
         let gl, canvas;
         let cube;
 
-        // Show status or error messages in the notification div
-        function showNotification(msg, isError = false) {
+        // Accumulate logs to display multiline status
+        let logs = [];
+
+        function showNotification(msg, isError = false, clear = false) {
+            if (clear) logs = [];
+            logs.push(msg);
             const notif = document.getElementById('notification');
-            notif.textContent = msg;
             notif.style.color = isError ? '#ff6666' : '#aaffaa';
+            notif.textContent = logs.join('\n');
         }
 
         async function initXR() {
             if (!navigator.xr) {
-                alert('WebXR not supported on this browser.');
-                showNotification('WebXR not supported', true);
+                alert('WebXR not supported');
+                showNotification('WebXR not supported', true, true);
                 return;
             }
 
             try {
-                showNotification('Requesting AR session...');
+                showNotification('Requesting AR session...', false, true);
                 xrSession = await navigator.xr.requestSession('immersive-ar', { requiredFeatures: ['camera-access'] });
                 showNotification('AR session started');
             } catch (e) {
@@ -306,17 +298,10 @@
                 return;
             }
 
-            // Create canvas and WebGL context compatible with XR
+            // Setup THREE.js renderer with XR support
             canvas = document.createElement('canvas');
             document.body.appendChild(canvas);
-
             gl = canvas.getContext('webgl', { xrCompatible: true });
-            if (!gl) {
-                alert('WebGL context creation failed.');
-                showNotification('Failed to create WebGL context', true);
-                return;
-            }
-
             renderer = new THREE.WebGLRenderer({ canvas, context: gl, alpha: true });
             renderer.xr.enabled = true;
             renderer.setSize(window.innerWidth, window.innerHeight);
@@ -324,42 +309,36 @@
 
             scene = new THREE.Scene();
 
-            // Add a cube to visualize localization
+            // Cube to visualize localization result
             const geometry = new THREE.BoxGeometry(0.1, 0.1, 0.1);
             const material = new THREE.MeshNormalMaterial();
             cube = new THREE.Mesh(geometry, material);
             cube.name = 'localizeCube';
+            cube.visible = false;  // hide until localized
             scene.add(cube);
 
             camera = new THREE.PerspectiveCamera();
 
-            // Bind WebGL context to XR session
             xrGlBinding = new XRWebGLBinding(xrSession, gl);
 
-            // Request reference space for positioning
             refSpace = await xrSession.requestReferenceSpace('local');
 
-            // Handle window resize to adjust renderer size
-            window.addEventListener('resize', () => {
-                renderer.setSize(window.innerWidth, window.innerHeight);
-            });
+            showNotification('Initialization complete, waiting for frames...');
 
             xrSession.requestAnimationFrame(onXRFrame);
         }
 
-        // Calculate camera intrinsics from projection matrix and viewport
         function getCameraIntrinsics(projectionMatrix, viewport) {
             const p = projectionMatrix;
-            // Focal lengths (fx, fy) and principal points (px, py)
-            const px = ((1 - p[8]) * viewport.width) / 2 + viewport.x;
-            const py = ((1 - p[9]) * viewport.height) / 2 + viewport.y;
-            const fx = (viewport.width / 2) * p[0];
-            const fy = (viewport.height / 2) * p[5];
-            return { fx, fy, px, py };
+            const u0 = ((1 - p[8]) * viewport.width) / 2 + viewport.x;
+            const v0 = ((1 - p[9]) * viewport.height) / 2 + viewport.y;
+            const ax = (viewport.width / 2) * p[0];
+            const ay = (viewport.height / 2) * p[5];
+            return { fx: ax, fy: ay, px: u0, py: v0 };
         }
 
-        // Capture image from a WebGL texture into a Blob for sending
         async function captureImageFromTexture(texture, gl) {
+            showNotification('Capturing image from camera texture...');
             if (!texture) {
                 throw new Error('No texture provided to captureImageFromTexture');
             }
@@ -371,27 +350,24 @@
                 throw new Error('Texture width or height is zero');
             }
 
-            // Create framebuffer and attach the texture
             const fb = gl.createFramebuffer();
             gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
             gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
 
-            // Check framebuffer status
-            if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+            const fbStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+            if (fbStatus !== gl.FRAMEBUFFER_COMPLETE) {
                 gl.bindFramebuffer(gl.FRAMEBUFFER, null);
                 gl.deleteFramebuffer(fb);
-                throw new Error('Framebuffer incomplete');
+                throw new Error('Framebuffer incomplete: ' + fbStatus);
             }
 
-            // Read pixels from framebuffer
             const pixels = new Uint8Array(width * height * 4);
             gl.readPixels(0, 0, width, height, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
 
-            // Cleanup framebuffer
             gl.bindFramebuffer(gl.FRAMEBUFFER, null);
             gl.deleteFramebuffer(fb);
 
-            // Flip pixels vertically (WebGL has inverted Y)
+            // Flip vertically
             const flippedPixels = new Uint8Array(width * height * 4);
             for (let y = 0; y < height; y++) {
                 const srcStart = y * width * 4;
@@ -399,7 +375,6 @@
                 flippedPixels.set(pixels.subarray(srcStart, srcStart + width * 4), destStart);
             }
 
-            // Draw pixels to canvas and convert to Blob
             const tempCanvas = document.createElement('canvas');
             tempCanvas.width = width;
             tempCanvas.height = height;
@@ -408,38 +383,36 @@
             imgData.data.set(flippedPixels);
             ctx.putImageData(imgData, 0, 0);
 
-            return new Promise((resolve, reject) => {
+            return new Promise(resolve => {
                 tempCanvas.toBlob(blob => {
                     if (!blob) {
-                        reject(new Error('Failed to create image blob'));
-                    } else {
-                        resolve({ blob, width, height });
+                        throw new Error('Failed to create image blob');
                     }
+                    showNotification('Image captured successfully');
+                    resolve({ blob, width, height });
                 }, 'image/jpeg', 0.9);
             });
         }
 
-        // Query MultiSet VPS localization API with camera data
         async function queryLocalizationAPI(formData) {
-            const url = 'https://api.multiset.com/vps/localize';
-
-            const response = await fetch(url, {
+            showNotification('Sending localization request...');
+            const response = await fetch('https://api.multiset.com/vps/localize', {
                 method: 'POST',
                 body: formData
             });
 
             if (!response.ok) {
                 const errorText = await response.text();
-                throw new Error(`API error: ${response.status} - ${errorText}`);
+                throw new Error('API error: ' + response.status + ' - ' + errorText);
             }
-
+            showNotification('Localization response received');
             return response.json();
         }
 
-        // Update Three.js scene cube with localization position & rotation
         function updateSceneWithLocalization(cube, localizationData) {
             if (!localizationData.position || !localizationData.rotation) {
                 showNotification('Invalid localization data received', true);
+                cube.visible = false;
                 console.warn('Invalid localization data:', localizationData);
                 return;
             }
@@ -449,9 +422,11 @@
 
             cube.position.set(pos.x, pos.y, pos.z);
             cube.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+            cube.visible = true;
+
+            showNotification(`Localization success!\nPosition: ${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}`);
         }
 
-        // Main XR frame loop
         async function onXRFrame(time, frame) {
             const session = frame.session;
             session.requestAnimationFrame(onXRFrame);
@@ -463,30 +438,24 @@
                 showNotification('No viewer pose available', true);
                 return;
             }
+            showNotification('Viewer pose acquired');
 
             const view = pose.views[0];
-            if (!view) {
-                showNotification('No view data available', true);
-                return;
-            }
-
             const intrinsics = getCameraIntrinsics(view.projectionMatrix, view.viewport);
+            showNotification(`Camera Intrinsics fx:${intrinsics.fx.toFixed(2)} fy:${intrinsics.fy.toFixed(2)}`);
 
             try {
-                // Get camera texture from XRWebGLBinding
                 const cameraTexture = xrGlBinding.getCameraImage();
 
                 if (!cameraTexture) {
                     showNotification('No camera image available', true);
                     return;
                 }
-
-                showNotification('Capturing camera image...');
+                showNotification('Camera image acquired');
 
                 const imageData = await captureImageFromTexture(cameraTexture, gl);
-                showNotification('Image captured, sending localization request...');
 
-                // Build form data to send to localization API
+                // Prepare formData
                 const formData = new FormData();
                 formData.append('fx', intrinsics.fx);
                 formData.append('fy', intrinsics.fy);
@@ -496,15 +465,13 @@
                 formData.append('imageHeight', imageData.height);
                 formData.append('queryImage', imageData.blob, 'frame.jpg');
 
-                // Add required credentials and map info
+                // Credentials & map info
                 formData.append('client_id', 'f67b6749-bf5b-42b5-b8a2-5ec3836503d4');
                 formData.append('client_secret', '3fd6c23ddcdcd6d58f3db3e3688c55a2fb587439a3f1d9f66ae90eb85a9df3a9');
                 formData.append('mapId', 'MAP_F1FZ9ANANFAC');
                 formData.append('isRightHanded', 'true');
 
                 const localizationResult = await queryLocalizationAPI(formData);
-
-                showNotification('Localization successful! Updating scene...');
 
                 updateSceneWithLocalization(cube, localizationResult);
 
@@ -517,12 +484,11 @@
         }
 
         document.getElementById('ar-button').addEventListener('click', () => {
-            // Disable button after click to prevent multiple session requests
-            const btn = document.getElementById('ar-button');
-            btn.disabled = true;
             initXR();
-            btn.style.display = 'none';
+            document.getElementById('ar-button').style.display = 'none';
         });
+
     </script>
 </body>
 </html>
+
